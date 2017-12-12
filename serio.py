@@ -1,159 +1,146 @@
 #!/usr/bin/env python
-# Small utility to upload a file to an embedded Linux system that provides a shell
-# via its serial port.
+# Small utility to upload a file to an embedded Linux system that provides a
+# shell via its serial port.
 
-import sys, time
-from getopt import GetoptError, getopt as GetOpt
+import time
+import argparse
+import traceback
 
-class SerialFTP:
 
-    IO_TIME = .1
-    BYTES_PER_LINE = 20
+class SerialFTP(object):
 
-    def __init__(self, port=None, baudrate=None, time=None, quiet=None):
+    def __init__(self, port, baudrate=115200, io_time=0.01, quiet=False,
+                 bytes_per_line=20):
+        self.bytes_per_line = bytes_per_line or 20
         self.quiet = quiet
-        if time is not None:
-            self.IO_TIME = time
-        self.s = serial.Serial(port=port, baudrate=baudrate)
-        #self.s.open()
+        self.io_time = io_time
+        self.port = port
+        self.baudrate = baudrate
+        self._socket = None
+
+    @property
+    def socket(self):
+        if self._socket is None:
+            self._socket = serial.Serial(port=self.port, baudrate=self.baudrate)
+        return self._socket
 
     def put(self, source, destination):
         data = open(source, 'rb').read()
         data_size = len(data)
         i = 0
-        j = 0
 
         # Create/zero the file
         self.write('\necho -ne > %s\n' % destination)
 
         # Loop through all the bytes in the source file and append them to
-        # the destination file BYTES_PER_LINE bytes at a time
+        # the destination file bytes_per_line bytes at a time
         while i < data_size:
             j = 0
             dpart = ''
 
-            while j < self.BYTES_PER_LINE and i < data_size:
+            while j < self.bytes_per_line and i < data_size:
                 dpart += '\\x%.2X' % int(ord(data[i]))
-                j+=1
-                i+=1
+                j += 1
+                i += 1
 
             self.write('\necho -ne "%s" >> %s\n' % (dpart, destination))
 
             # Show upload status
             if not self.quiet:
-                print "%d / %d" % (i, data_size)
+                print("%d / %d" % (i, data_size))
 
         return i
 
     def write(self, data):
-        self.s.write(data)
+        self.socket.write(data)
         if data.endswith('\n'):
             # Have to give the target system time for disk/flash I/O
-            time.sleep(self.IO_TIME)
+            time.sleep(self.io_time)
 
     def close(self):
-        self.s.close()
+        self.socket.close()
 
 
 class TelnetFTP(SerialFTP):
 
-    def __init__(self, host, port, login=None, passwd=None, time=None, quiet=None):
-        self.quiet = quiet
-        if time is not None:
-            self.IO_TIME = time
-        self.s = telnetlib.Telnet(host, port, timeout=10)
-        # We're not interested in matching input, just interested
-        # in consuming it, until it stops
-        DONT_MATCH = "\xff\xff\xff"
-        if login:
-            print(self.s.read_until(DONT_MATCH, 0.5))
-            self.s.write(login + "\n")
-            print(self.s.read_until(DONT_MATCH, 0.5))
-            self.s.write(passwd + "\n")
-        # Skip shell banner
-        print(self.s.read_until(DONT_MATCH, self.IO_TIME))
+    def __init__(self, host, login, passwd, *args, **kwargs):
+        super(TelnetFTP, self).__init__(*args, **kwargs)
+        self.host = host
+        self.login = login
+        self.passwd = passwd
 
+    @property
+    def socket(self):
+        if self._socket is None:
+            self._socket = telnetlib.Telnet(self.host, self.port, timeout=10)
+            # We're not interested in matching input, just interested
+            # in consuming it, until it stops
+            DONT_MATCH = "\xff\xff\xff"
+            if self.login:
+                print(self.socket.read_until(DONT_MATCH, 0.5))
+                self.socket.write(self.login + "\n")
+                print(self.socket.read_until(DONT_MATCH, 0.5))
+                self.socket.write(self.passwd + "\n")
+            # Skip shell banner
+            print(self.socket.read_until(DONT_MATCH, self.io_time))
+        return self._socket
 
-def usage():
-    print '\nUsage: %s [OPTIONS]\n' % sys.argv[0]
-    print '\t-s, --source=<local file>              Path to local file'
-    print '\t-d, --destination=<remote file>        Path to remote file'
-    print '\t    --telnet=<host>                    Upload via telnet instead of serial'
-    print '\t-p, --port=<port>                      Serial port to use [/dev/ttyUSB0] or telnet port [23]'
-    print '\t-b, --baudrate=<baud>                  Serial port baud rate [115200]'
-    print '\t-t, --time=<seconds>                   Time to wait between echo commands [0.1]'
-    print '\t    --login=<username>                 Login name for telnet'
-    print '\t    --pass=<passwd>                    Password for telnet'
-    print '\t-q, --quiet                            Supress status messages'
-    print '\t-h, --help                             Show help'
-    print ''
-    sys.exit(1)
 
 def main():
-
-    host = None
-    port = None
-    baudrate = 115200
-    login = None
-    passwd = None
-    source = None
-    destination = None
-    time = None
-    quiet = False
-
-    try:
-        opts, args = GetOpt(sys.argv[1:],'p:b:s:d:t:qh', ['port=', 'baudrate=',
-            'source=', 'destination=', 'time=', 'quiet', 'help', 'telnet=', 'login=', 'pass='])
-    except GetoptError, e:
-        print 'Usage error:', e
-        usage()
-
-    for opt, arg in opts:
-        if opt in ('--telnet',):
-            host = arg
-        elif opt in ('--login',):
-            login = arg
-        elif opt in ('--pass',):
-            passwd = arg
-        elif opt in ('-p', '--port'):
-            port = arg
-        elif opt in ('-b', '--baudrate'):
-            baudrate = arg
-        elif opt in ('-s', '--source'):
-            source = arg
-        elif opt in ('-d', '--destination'):
-            destination = arg
-        elif opt in ('-t', '--time'):
-            time = float(arg)
-        elif opt in ('-q', '--quiet'):
-            quiet = True
-        elif opt in ('-h', '--help'):
-            usage()
-
-    if not source or not destination:
-        print 'Usage error: must specify -s and -d options'
-        usage()
+    parser = argparse.ArgumentParser(
+        description='Upload file via serial or Telnet connection')
+    parser.add_argument('-s', '--source', help='Path to local file')
+    parser.add_argument('-d', '--destination', help='Path to remote file')
+    parser.add_argument(
+        '-p', '--port',
+        help='Serial port to use [/dev/ttyUSB0] or telnet port [23]'
+    )
+    parser.add_argument(
+        '-b', '--baudrate', default=115200, type=int,
+        help='Serial port baud rate'
+    )
+    parser.add_argument(
+        '-t', '--wait-time', default=0.01, type=float,
+        help='Time to wait between echo commands'
+    )
+    parser.add_argument(
+        '-q', '--quiet', action='store_true',
+        help='Reduce verbosity'
+    )
+    parser.add_argument(
+        '--bytes-per-line', default=20, type=int,
+        help='Number of bytes to send per echo command'
+    )
+    parser.add_argument('--telnet', help='Upload via telnet instead of serial')
+    parser.add_argument('--host', help='Host for telnet connection')
+    parser.add_argument('--login', help='Login name for telnet')
+    parser.add_argument('--passwd', help='Password name for telnet')
+    args = parser.parse_args()
 
     try:
-        if host:
+        if args.host:
             global telnetlib
             import telnetlib
-            if not port:
-                port = 23
-            print(host, port, time, quiet)
-            sftp = TelnetFTP(host=host, port=port, login=login, passwd=passwd, time=time, quiet=quiet)
+            port = int(args.port) or 23
+            print(args.host, port, args.wait_time, args.quiet)
+            sftp = TelnetFTP(args.host, port, login=args.login,
+                             passwd=args.passwd, io_time=args.wait_time,
+                             quiet=args.quiet,
+                             bytes_per_line=args.bytes_per_line)
         else:
             global serial
             import serial
-            if not port:
-                port = '/dev/ttyUSB0'
-            sftp = SerialFTP(port=port, baudrate=baudrate, time=time, quiet=quiet)
-        size = sftp.put(source, destination)
+            port = args.port or '/dev/ttyUSB0'
+            sftp = SerialFTP(port, baudrate=args.baudrate,
+                             io_time=args.wait_time, quiet=args.quiet,
+                             bytes_per_line=args.bytes_per_line)
+        size = sftp.put(args.source, args.destination)
         sftp.close()
 
-        print 'Uploaded %d bytes from %s to %s' % (size, source, destination)
-    except Exception, e:
-        print "ERROR:", e
+        print('Uploaded %d bytes from %s to %s' %
+              (size, args.source, args.destination))
+    except:
+        traceback.print_exc()
 
 
 if __name__ == '__main__':
